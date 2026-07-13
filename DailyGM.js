@@ -1,0 +1,164 @@
+// --- КОНФИГУРАЦИЯ ---
+
+const GM_ADDRESSES = window.MirtanaProtocolConfig.GM_ADDRESSES;
+
+const GM_ABI = [{ "anonymous": false, "inputs": [{ "indexed": true, "internalType": "address", "name": "user", "type": "address" }, { "indexed": false, "internalType": "uint256", "name": "count", "type": "uint256" }, { "indexed": false, "internalType": "uint256", "name": "timestamp", "type": "uint256" }], "name": "GMSent", "type": "event" }, { "inputs": [{ "internalType": "address", "name": "user", "type": "address" }], "name": "getGMStatus", "outputs": [{ "internalType": "bool", "name": "canClaim", "type": "bool" }, { "internalType": "uint256", "name": "timeLeft", "type": "uint256" }, { "internalType": "uint256", "name": "count", "type": "uint256" }], "stateMutability": "view", "type": "function" }, { "inputs": [{ "internalType": "address", "name": "", "type": "address" }], "name": "gmCount", "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }], "stateMutability": "view", "type": "function" }, { "inputs": [{ "internalType": "address", "name": "", "type": "address" }], "name": "lastGM", "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }], "stateMutability": "view", "type": "function" }, { "inputs": [], "name": "sayGM", "outputs": [], "stateMutability": "nonpayable", "type": "function" }];
+
+
+let gmCountdown;
+
+async function checkGMStatus() {
+    const btn = document.getElementById('gmBtn');
+    const timerText = document.getElementById('gmTimerText');
+    const countDisplay = document.getElementById('userGmCount');
+
+    if (typeof signer === 'undefined' || !signer || !userAccount) return;
+
+    try {
+        const network = await provider.getNetwork();
+        const chainId = Number(network.chainId);
+        const gmAddr = GM_ADDRESSES[chainId];
+
+        if (!gmAddr) {
+            if (btn) {
+                btn.innerText = "UNSUPPORTED NETWORK";
+                btn.disabled = true;
+            }
+            return;
+        }
+
+        const contract = new ethers.Contract(gmAddr, GM_ABI, signer);
+        const status = await contract.getGMStatus(userAccount);
+
+        if (countDisplay) countDisplay.innerText = status.count.toString();
+
+        if (status.canClaim) {
+            if (btn) {
+                btn.innerText = "SAY GM!";
+                btn.disabled = false;
+                btn.style.opacity = "1";
+                btn.style.cursor = "pointer";
+            }
+            if (timerText) timerText.innerText = "Ready to claim your daily GM!";
+            if (gmCountdown) clearInterval(gmCountdown);
+        } else {
+            if (btn) {
+                btn.disabled = true;
+                btn.style.opacity = "0.5";
+                btn.style.cursor = "not-allowed";
+            }
+            startGMTimer(parseInt(status.timeLeft));
+        }
+    } catch (error) {
+        console.error("Failed to check GM status:", error);
+    }
+}
+
+function startGMTimer(seconds) {
+    const btn = document.getElementById('gmBtn');
+    const timerText = document.getElementById('gmTimerText');
+
+    if (gmCountdown) clearInterval(gmCountdown);
+
+    gmCountdown = setInterval(() => {
+        seconds--;
+        if (seconds <= 0) {
+            clearInterval(gmCountdown);
+            checkGMStatus();
+            return;
+        }
+
+        const h = Math.floor(seconds / 3600);
+        const m = Math.floor((seconds % 3600) / 60);
+        const s = seconds % 60;
+
+        if (btn) btn.innerText = "GM CLAIMED";
+        if (timerText) timerText.innerText = `Next GM in: ${h}h ${m}m ${s}s`;
+    }, 1000);
+}
+
+async function initGMContract() {
+    const { chainId } = await provider.getNetwork();
+
+    const contractAddress = GM_ADDRESSES[chainId];
+
+    if (!contractAddress) {
+        console.error("Unsupported network! Please switch to Robinhood or Arc.");
+        return;
+    }
+
+    const gmContract = new ethers.Contract(contractAddress, GM_ABI, signer);
+    return gmContract;
+}
+
+async function handleGM() {
+    const btn = document.getElementById('gmBtn');
+    try {
+        const network = await provider.getNetwork();
+        const chainId = Number(network.chainId);
+        const gmAddr = GM_ADDRESSES[chainId];
+
+        if (!gmAddr) return alert("Please switch to a supported network!");
+
+        await ensureCorrectNetwork();
+
+        const contract = new ethers.Contract(gmAddr, GM_ABI, signer);
+
+        if (window.openModal) {
+            window.openModal('loading', 'Recording your daily GM activity... Please confirm in wallet.');
+        }
+
+        if (btn) btn.disabled = true;
+
+        const tx = await contract.sayGM();
+
+        if (window.openModal) {
+            window.openModal('loading', 'GM Transaction sent! Waiting for blockchain confirmation...', tx.hash);
+        }
+
+        await tx.wait();
+
+        // Отправляем в n8n, используя уже существующие переменные chainId и gmAddr
+        await sendWeb3EventToN8n(
+            userAccount, // Используем ваш адрес пользователя
+            tx.hash,
+            "Daily GM",
+            gmAddr, // Используем адрес контракта GM
+            {
+                type: 'GM_ACTION',
+                chainId: chainId // Передаем ID сети
+            }
+        );
+        if (window.openModal) {
+
+            window.openModal('success', 'Your daily GM has been recorded forever!', tx.hash);
+        }
+
+        await checkGMStatus();
+
+    } catch (error) {
+        console.error("GM error:", error);
+        if (window.closeStatusModal) window.closeStatusModal();
+
+        if (error.code === 4001) {
+            alert("Transaction rejected");
+        } else {
+            if (window.openModal) window.openModal('error', error.reason || error.message || "Transaction failed");
+        }
+        await checkGMStatus();
+    }
+}
+
+function getExplorerUrl(chainId, hash) {
+    const explorers = {
+        46630: "https://explorer.testnet.chain.robinhood.com/tx/",
+        5042002: "https://testnet.arcscan.app/tx/"
+    };
+    return (explorers[chainId] || "") + hash;
+}
+
+window.handleGM = handleGM;
+window.checkGMStatus = checkGMStatus;
+if (window.ethereum) {
+    window.ethereum.on('chainChanged', () => window.location.reload());
+}
